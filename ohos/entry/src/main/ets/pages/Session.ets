@@ -408,17 +408,13 @@ struct TypeBar {
   @State passwordMode: boolean = false;
 
   private submitDraft(): void {
-    if (this.draft.length > 0) {
-      const text = this.draft;
-      this.draft = '';
-      this.onSend(text);
-      // 密码要等逐字落到对方框里再回车，太快会提交空密码
-      setTimeout(() => {
-        this.onControl(27);
-      }, 450);
-    } else {
-      this.onControl(27);
+    if (this.draft.length === 0) {
+      return;
     }
+    const text = this.draft;
+    this.draft = '';
+    // 只发文本，不自动回车——表单首行回车会误提交
+    this.onSend(text);
   }
 
   build() {
@@ -456,7 +452,7 @@ struct TypeBar {
       Row({ space: 6 }) {
         TextInput({
           text: this.draft,
-          placeholder: this.passwordMode ? '密码模式：输入后点发送' : '文本模式：输入后点发送'
+          placeholder: this.passwordMode ? '密码：输入后点发送（不含回车）' : '文本：输入后点发送（不含回车）'
         })
           .layoutWeight(1)
           .height(40)
@@ -512,6 +508,13 @@ struct TypeBar {
           .fontSize(14)
           .onClick(() => {
             this.onControl(2);
+          })
+        Button('回车')
+          .layoutWeight(1)
+          .height(40)
+          .fontSize(14)
+          .onClick(() => {
+            this.onControl(27);
           })
         Button('发送')
           .layoutWeight(1)

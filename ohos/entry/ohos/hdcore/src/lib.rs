@@ -53,10 +53,12 @@ static DISPLAY_H: AtomicI32 = AtomicI32::new(0);
 static SESSION_MSG_LOGGED: AtomicI32 = AtomicI32::new(0);
 static LAST_VIDEO_MS: AtomicI64 = AtomicI64::new(0);
 static LAST_REFRESH_ASK_MS: AtomicI64 = AtomicI64::new(0);
+static LAST_PROFILE_MS: AtomicI64 = AtomicI64::new(0);
 static LAST_AUTO_FPS: AtomicI32 = AtomicI32::new(0);
 static TEST_DELAY_ECHOED: AtomicI32 = AtomicI32::new(0);
 static OUTGOING: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 static LAST_MOUSE: Mutex<(i32, i32)> = Mutex::new((0, 0));
+const PROFILE_REASSERT_MS: i64 = 8_000;
 
 fn append_log(line: &str) {
     if let Ok(mut logs) = LOGS.lock() {
@@ -1030,6 +1032,30 @@ fn maybe_adjust_fps(_queue_len: usize) {
     // 不再根据队列改 peer FPS：会覆盖自定义档，移动网上还容易和 ABR 互相打架。
 }
 
+fn enqueue_quality_profile(log: bool) {
+    let (iq, q, fps) = profile_knobs();
+    enqueue_msg(build_image_quality(iq));
+    if iq == 0 && q > 0 {
+        enqueue_msg(build_custom_image_quality(q));
+    }
+    enqueue_msg(build_custom_fps(fps));
+    enqueue_msg(build_auto_fps(fps));
+    LAST_AUTO_FPS.store(fps as i32, Ordering::SeqCst);
+    LAST_PROFILE_MS.store(now_ms(), Ordering::SeqCst);
+    if log {
+        append_log(&format!("画质保活 q={q} fps={fps}"));
+    }
+}
+
+fn maybe_reassert_quality_profile() {
+    let last = LAST_PROFILE_MS.load(Ordering::SeqCst);
+    let now = now_ms();
+    if last > 0 && now.saturating_sub(last) < PROFILE_REASSERT_MS {
+        return;
+    }
+    enqueue_quality_profile(true);
+}
+
 fn enqueue_video_packet(codec: &str, data: Vec<u8>, key: bool) {
     let packet = EncodedPacket {
         codec: codec.to_string(),
@@ -1230,8 +1256,9 @@ fn handle_session_message(payload: &[u8]) -> Result<Option<Vec<u8>>, String> {
                 }
             }
             if encoded {
-                // 即便未开 video_ack，也尽快回执，避免对端 response_delayed 把 FPS 砸到 MIN
-                enqueue_msg_front(build_video_received());
+                // 同步回执（同 TestDelay）：走 OUTGOING 会被鼠标/键盘堵住，
+                // 对端易判 response_delayed → FPS 锁在 MIN(~2) → 画面发虚。
+                return Ok(Some(frame_message(&build_video_received())));
             } else {
                 ask_refresh_video(&format!("empty video_frame bytes={}", inner.len()));
             }
@@ -1293,6 +1320,7 @@ fn spawn_writer(stream: &TcpStream) {
                 .spawn(move || {
                     while RUNNING.load(Ordering::SeqCst) && CONNECT_GEN.load(Ordering::SeqCst) == gen {
                         flush_outgoing(&mut writer);
+                        maybe_reassert_quality_profile();
                         let now = now_ms();
                         let last = LAST_VIDEO_MS.load(Ordering::SeqCst);
                         let refresh_ms = if use_hd_profile() { 8000 } else { 6000 };
@@ -1318,16 +1346,10 @@ fn run_session(stream: &mut TcpStream) {
     spawn_writer(stream);
     if stream.write_all(&frame_message(&build_option_misc())).is_ok() {
         let (iq, q, fps) = profile_knobs();
-        enqueue_msg(build_image_quality(iq));
-        if iq == 0 && q > 0 {
-            enqueue_msg(build_custom_image_quality(q));
-        }
-        enqueue_msg(build_custom_fps(fps));
-        enqueue_msg(build_auto_fps(fps));
-        LAST_AUTO_FPS.store(fps as i32, Ordering::SeqCst);
+        enqueue_quality_profile(false);
         let path = if is_direct_session() { "direct" } else { "relay" };
         append_log(&format!(
-            "sent OptionMessage {path} iq={iq} q={q} fps={fps} H265"
+            "sent OptionMessage {path} iq={iq} q={q} fps={fps} H265 (sync VideoReceived)"
         ));
     }
     if stream
@@ -1345,7 +1367,7 @@ fn run_session(stream: &mut TcpStream) {
                 match handle_session_message(&payload) {
                     Ok(Some(reply)) => {
                         if stream.write_all(&reply).is_err() {
-                            append_log("TestDelay write fail");
+                            append_log("sync reply write fail");
                             break;
                         }
                     }
@@ -1781,6 +1803,7 @@ pub extern "C" fn hd_connect_start(desk_id: *const c_char, password: *const c_ch
     TEST_DELAY_ECHOED.store(0, Ordering::SeqCst);
     LAST_VIDEO_MS.store(0, Ordering::SeqCst);
     LAST_REFRESH_ASK_MS.store(0, Ordering::SeqCst);
+    LAST_PROFILE_MS.store(0, Ordering::SeqCst);
     DISPLAY_W.store(0, Ordering::SeqCst);
     DISPLAY_H.store(0, Ordering::SeqCst);
     LAST_COPIED_KEY.store(0, Ordering::SeqCst);
@@ -2104,13 +2127,9 @@ pub extern "C" fn hd_send_chord(chr: c_int, modifier: c_int) {
 /// Re-apply unified image quality (UI no longer offers smooth/HD toggle).
 #[no_mangle]
 pub extern "C" fn hd_set_image_quality(_quality: c_int) {
-    let (iq, bitrate, fps) = profile_knobs();
-    LAST_AUTO_FPS.store(fps as i32, Ordering::SeqCst);
+    let (_iq, bitrate, fps) = profile_knobs();
     enqueue_msg(build_option_misc());
-    enqueue_msg(build_image_quality(iq));
-    enqueue_msg(build_custom_image_quality(bitrate));
-    enqueue_msg(build_custom_fps(fps));
-    enqueue_msg(build_auto_fps(fps));
+    enqueue_quality_profile(false);
     let path = if is_direct_session() { "direct" } else { "relay" };
     ask_refresh_video(&format!("profile unified {path} q={bitrate} fps={fps}"));
     append_log(&format!("profile -> unified {path} q={bitrate} fps={fps}"));
