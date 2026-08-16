@@ -409,11 +409,13 @@ struct TypeBar {
 
   private submitDraft(): void {
     if (this.draft.length === 0) {
+      // 空框：真回车
+      this.onControl(27);
       return;
     }
+    // 有字：只发文字，不带真回车
     const text = this.draft;
     this.draft = '';
-    // 只发文本，不自动回车——表单首行回车会误提交
     this.onSend(text);
   }
 
@@ -452,7 +454,7 @@ struct TypeBar {
       Row({ space: 6 }) {
         TextInput({
           text: this.draft,
-          placeholder: this.passwordMode ? '密码：输入后点发送（不含回车）' : '文本：输入后点发送（不含回车）'
+          placeholder: this.passwordMode ? '有字点回车=发送，空框再点=回车' : '有字点回车=发送，空框再点=回车'
         })
           .layoutWeight(1)
           .height(40)
@@ -480,46 +482,44 @@ struct TypeBar {
           })
       }
       .width('100%')
-      Row({ space: 6 }) {
+      Row({ space: 4 }) {
         Button('中英')
           .layoutWeight(1)
           .height(40)
-          .fontSize(14)
+          .fontSize(12)
+          .padding({ left: 2, right: 2 })
           .onClick(() => {
             this.onImeToggle();
           })
         Button('空格')
           .layoutWeight(1)
           .height(40)
-          .fontSize(14)
+          .fontSize(12)
+          .padding({ left: 2, right: 2 })
           .onClick(() => {
             this.onControl(30);
           })
         Button('Tab')
           .layoutWeight(1)
           .height(40)
-          .fontSize(14)
+          .fontSize(12)
+          .padding({ left: 2, right: 2 })
           .onClick(() => {
             this.onControl(31);
           })
         Button('退格')
           .layoutWeight(1)
           .height(40)
-          .fontSize(14)
+          .fontSize(12)
+          .padding({ left: 2, right: 2 })
           .onClick(() => {
             this.onControl(2);
           })
-        Button('回车')
+        Button(this.draft.length > 0 ? '发送' : '回车')
           .layoutWeight(1)
           .height(40)
-          .fontSize(14)
-          .onClick(() => {
-            this.onControl(27);
-          })
-        Button('发送')
-          .layoutWeight(1)
-          .height(40)
-          .fontSize(14)
+          .fontSize(12)
+          .padding({ left: 2, right: 2 })
           .backgroundColor('#1E88E5')
           .fontColor(Color.White)
           .onClick(() => {
