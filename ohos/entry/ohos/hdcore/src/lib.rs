@@ -53,12 +53,17 @@ static DISPLAY_H: AtomicI32 = AtomicI32::new(0);
 static SESSION_MSG_LOGGED: AtomicI32 = AtomicI32::new(0);
 static LAST_VIDEO_MS: AtomicI64 = AtomicI64::new(0);
 static LAST_REFRESH_ASK_MS: AtomicI64 = AtomicI64::new(0);
-static LAST_PROFILE_MS: AtomicI64 = AtomicI64::new(0);
 static LAST_AUTO_FPS: AtomicI32 = AtomicI32::new(0);
 static TEST_DELAY_ECHOED: AtomicI32 = AtomicI32::new(0);
+static LAST_TEST_DELAY_CLEAR_MS: AtomicI64 = AtomicI64::new(0);
 static OUTGOING: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 static LAST_MOUSE: Mutex<(i32, i32)> = Mutex::new((0, 0));
-const PROFILE_REASSERT_MS: i64 = 8_000;
+/// Serialize all TCP writes. Session thread (TestDelay echo) and writer thread
+/// (mouse/keys/options) previously wrote concurrently and corrupted framing,
+/// so the host never cleared last_test_delay → response_delayed → FPS=2.
+static STREAM_WRITE: Mutex<()> = Mutex::new(());
+
+const TEST_DELAY_CLEAR_MS: i64 = 250;
 
 fn append_log(line: &str) {
     if let Ok(mut logs) = LOGS.lock() {
@@ -323,9 +328,28 @@ fn enqueue_msg(payload: Vec<u8>) {
     }
 }
 
+fn write_raw(stream: &mut TcpStream, framed: &[u8]) -> bool {
+    let _guard = match STREAM_WRITE.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    stream.write_all(framed).is_ok()
+}
+
+fn write_msg(stream: &mut TcpStream, payload: &[u8]) -> bool {
+    write_raw(stream, &frame_message(payload))
+}
+
 fn flush_outgoing(stream: &mut TcpStream) {
     let messages = match OUTGOING.lock() {
         Ok(mut queue) => std::mem::take(&mut *queue),
+        Err(_) => return,
+    };
+    if messages.is_empty() {
+        return;
+    }
+    let _guard = match STREAM_WRITE.lock() {
+        Ok(g) => g,
         Err(_) => return,
     };
     for message in messages {
@@ -537,8 +561,12 @@ fn read_framed(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
         packed |= (header[3] as usize) << 24;
     }
     let msg_len = packed >> 2;
-    if msg_len == 0 || msg_len > 64 * 1024 * 1024 {
+    // len=0：合法空帧（勿当成错误，否则可能丢掉后续对齐）
+    if msg_len > 64 * 1024 * 1024 {
         return Err(format!("bad frame len {msg_len}"));
+    }
+    if msg_len == 0 {
+        return Ok(Vec::new());
     }
     if msg_len > 200_000 {
         append_log(&format!("big frame {msg_len}"));
@@ -977,6 +1005,18 @@ fn build_option_misc() -> Vec<u8> {
     msg
 }
 
+/// Quality + custom_fps (+ auto_adjust_fps) in ONE Misc — never send partial
+/// OptionMessage, or peer applies protobuf default custom_fps=0 and locks FPS.
+fn build_profile_option_misc() -> Vec<u8> {
+    let (_iq, _q, fps) = profile_knobs();
+    let mut misc = Vec::new();
+    encode_bytes(&mut misc, 7, &build_option_message());
+    encode_varint_field(&mut misc, 28, fps as u64); // Misc.auto_adjust_fps
+    let mut msg = Vec::new();
+    encode_bytes(&mut msg, 19, &misc);
+    msg
+}
+
 fn build_test_delay_reply(inner: &[u8]) -> Vec<u8> {
     // Official client echoes TestDelay bytes as-is (from_client stays false).
     // Peer measures RTT only on from_client=false replies and clears last_test_delay.
@@ -984,6 +1024,15 @@ fn build_test_delay_reply(inner: &[u8]) -> Vec<u8> {
     // user_delay_response_elapsed marks response_delayed → FPS locked at MIN_FPS+1 (=2).
     let mut msg = Vec::new();
     encode_bytes(&mut msg, 5, inner);
+    msg
+}
+
+/// 主动发一条 from_client=false 的空 TestDelay。
+/// 主机只要 last_test_delay 未清，就会用这条回包清计时并写入 network_delay。
+/// 用于兜底：会话里长期收不到/解不出主机 TestDelay 时，也会锁死在 2fps。
+fn build_test_delay_clear() -> Vec<u8> {
+    let mut msg = Vec::new();
+    encode_bytes(&mut msg, 5, &[]);
     msg
 }
 
@@ -1030,30 +1079,6 @@ fn request_lower_fps(fps: u32, reason: &str) {
 
 fn maybe_adjust_fps(_queue_len: usize) {
     // 不再根据队列改 peer FPS：会覆盖自定义档，移动网上还容易和 ABR 互相打架。
-}
-
-fn enqueue_quality_profile(log: bool) {
-    let (iq, q, fps) = profile_knobs();
-    enqueue_msg(build_image_quality(iq));
-    if iq == 0 && q > 0 {
-        enqueue_msg(build_custom_image_quality(q));
-    }
-    enqueue_msg(build_custom_fps(fps));
-    enqueue_msg(build_auto_fps(fps));
-    LAST_AUTO_FPS.store(fps as i32, Ordering::SeqCst);
-    LAST_PROFILE_MS.store(now_ms(), Ordering::SeqCst);
-    if log {
-        append_log(&format!("画质保活 q={q} fps={fps}"));
-    }
-}
-
-fn maybe_reassert_quality_profile() {
-    let last = LAST_PROFILE_MS.load(Ordering::SeqCst);
-    let now = now_ms();
-    if last > 0 && now.saturating_sub(last) < PROFILE_REASSERT_MS {
-        return;
-    }
-    enqueue_quality_profile(true);
 }
 
 fn enqueue_video_packet(codec: &str, data: Vec<u8>, key: bool) {
@@ -1222,11 +1247,10 @@ fn handle_session_message(payload: &[u8]) -> Result<Option<Vec<u8>>, String> {
     log_session_message(field, payload.len());
     match (field, value) {
         (5, ProtoValue::Bytes(inner)) => {
-            // 同步回显：移动网上行拥堵时，走 OUTGOING 队列易超时触发 response_delayed→2fps
+            // 原样回显 from_client=false，主机才会清 last_test_delay。
             let n = TEST_DELAY_ECHOED.fetch_add(1, Ordering::SeqCst) + 1;
-            if n <= 3 || n % 30 == 0 {
-                append_log(&format!("echo TestDelay n={n} bytes={}", inner.len()));
-            }
+            LAST_TEST_DELAY_CLEAR_MS.store(now_ms(), Ordering::SeqCst);
+            append_log(&format!("echo TestDelay n={n} bytes={}", inner.len()));
             return Ok(Some(frame_message(&build_test_delay_reply(inner))));
         }
         (6, ProtoValue::Bytes(inner)) => {
@@ -1256,9 +1280,9 @@ fn handle_session_message(payload: &[u8]) -> Result<Option<Vec<u8>>, String> {
                 }
             }
             if encoded {
-                // 同步回执（同 TestDelay）：走 OUTGOING 会被鼠标/键盘堵住，
-                // 对端易判 response_delayed → FPS 锁在 MIN(~2) → 画面发虚。
-                return Ok(Some(frame_message(&build_video_received())));
+                // LoginRequest.video_ack_required=0（与官方桌面端一致）：
+                // 主机发送帧时已自通知 fetched，不要每帧回 VideoReceived，
+                // 否则与 writer 线程抢写 TCP，易毁掉 TestDelay 回显。
             } else {
                 ask_refresh_video(&format!("empty video_frame bytes={}", inner.len()));
             }
@@ -1309,6 +1333,21 @@ fn is_idle_read(err: &str) -> bool {
         || lower.contains("10060")
 }
 
+fn maybe_clear_test_delay(stream: &mut TcpStream) {
+    let now = now_ms();
+    let last = LAST_TEST_DELAY_CLEAR_MS.load(Ordering::SeqCst);
+    if last != 0 && now.saturating_sub(last) < TEST_DELAY_CLEAR_MS {
+        return;
+    }
+    LAST_TEST_DELAY_CLEAR_MS.store(now, Ordering::SeqCst);
+    if write_msg(stream, &build_test_delay_clear()) {
+        let n = TEST_DELAY_ECHOED.fetch_add(1, Ordering::SeqCst) + 1;
+        if n <= 10 || n % 40 == 0 {
+            append_log(&format!("clear TestDelay n={n}"));
+        }
+    }
+}
+
 fn spawn_writer(stream: &TcpStream) {
     let gen = CONNECT_GEN.load(Ordering::SeqCst);
     match stream.try_clone() {
@@ -1320,7 +1359,7 @@ fn spawn_writer(stream: &TcpStream) {
                 .spawn(move || {
                     while RUNNING.load(Ordering::SeqCst) && CONNECT_GEN.load(Ordering::SeqCst) == gen {
                         flush_outgoing(&mut writer);
-                        maybe_reassert_quality_profile();
+                        maybe_clear_test_delay(&mut writer);
                         let now = now_ms();
                         let last = LAST_VIDEO_MS.load(Ordering::SeqCst);
                         let refresh_ms = if use_hd_profile() { 8000 } else { 6000 };
@@ -1343,22 +1382,20 @@ fn spawn_writer(stream: &TcpStream) {
 fn run_session(stream: &mut TcpStream) {
     let gen = CONNECT_GEN.load(Ordering::SeqCst);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_nodelay(true);
     spawn_writer(stream);
-    if stream.write_all(&frame_message(&build_option_misc())).is_ok() {
+    if write_msg(stream, &build_profile_option_misc()) {
         let (iq, q, fps) = profile_knobs();
-        enqueue_quality_profile(false);
+        LAST_AUTO_FPS.store(fps as i32, Ordering::SeqCst);
         let path = if is_direct_session() { "direct" } else { "relay" };
         append_log(&format!(
-            "sent OptionMessage {path} iq={iq} q={q} fps={fps} H265 (sync VideoReceived)"
+            "sent OptionMessage {path} iq={iq} q={q} fps={fps} H265 (write-lock+TestDelay clear)"
         ));
     }
-    if stream
-        .write_all(&frame_message(&build_capture_displays()))
-        .is_ok()
-    {
+    if write_msg(stream, &build_capture_displays()) {
         append_log("sent CaptureDisplays");
     }
-    if stream.write_all(&frame_message(&build_refresh_video())).is_ok() {
+    if write_msg(stream, &build_refresh_video()) {
         append_log("sent refresh_video");
     }
     while RUNNING.load(Ordering::SeqCst) && CONNECT_GEN.load(Ordering::SeqCst) == gen {
@@ -1366,7 +1403,8 @@ fn run_session(stream: &mut TcpStream) {
             Ok(payload) => {
                 match handle_session_message(&payload) {
                     Ok(Some(reply)) => {
-                        if stream.write_all(&reply).is_err() {
+                        // TestDelay 等必须立刻写回，且与 writer 共用 STREAM_WRITE。
+                        if !write_raw(stream, &reply) {
                             append_log("sync reply write fail");
                             break;
                         }
@@ -1801,9 +1839,9 @@ pub extern "C" fn hd_connect_start(desk_id: *const c_char, password: *const c_ch
     KEYFRAME_ASKS.store(0, Ordering::SeqCst);
     SESSION_MSG_LOGGED.store(0, Ordering::SeqCst);
     TEST_DELAY_ECHOED.store(0, Ordering::SeqCst);
+    LAST_TEST_DELAY_CLEAR_MS.store(0, Ordering::SeqCst);
     LAST_VIDEO_MS.store(0, Ordering::SeqCst);
     LAST_REFRESH_ASK_MS.store(0, Ordering::SeqCst);
-    LAST_PROFILE_MS.store(0, Ordering::SeqCst);
     DISPLAY_W.store(0, Ordering::SeqCst);
     DISPLAY_H.store(0, Ordering::SeqCst);
     LAST_COPIED_KEY.store(0, Ordering::SeqCst);
@@ -2128,8 +2166,8 @@ pub extern "C" fn hd_send_chord(chr: c_int, modifier: c_int) {
 #[no_mangle]
 pub extern "C" fn hd_set_image_quality(_quality: c_int) {
     let (_iq, bitrate, fps) = profile_knobs();
-    enqueue_msg(build_option_misc());
-    enqueue_quality_profile(false);
+    LAST_AUTO_FPS.store(fps as i32, Ordering::SeqCst);
+    enqueue_msg(build_profile_option_misc());
     let path = if is_direct_session() { "direct" } else { "relay" };
     ask_refresh_video(&format!("profile unified {path} q={bitrate} fps={fps}"));
     append_log(&format!("profile -> unified {path} q={bitrate} fps={fps}"));
