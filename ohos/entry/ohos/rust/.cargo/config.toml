@@ -1,0 +1,9 @@
+[build]
+target = "aarch64-unknown-linux-ohos"
+
+[target.aarch64-unknown-linux-ohos]
+linker = "clang"
+ar = "llvm-ar"
+
+[net]
+git-fetch-with-cli = true

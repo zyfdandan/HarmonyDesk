@@ -1,0 +1,57 @@
+# Rust
+Cargo.lock
+**/target/
+**/*.rs.bk
+*.pdb
+
+# HarmonyOS / DevEco
+.harmonyos/
+**/.hvigor/
+**/.cxx/
+**/build/
+**/oh_modules/
+**/node_modules/
+local.properties
+.preview/
+.appanalyzer/
+
+# Native libs (rebuild with scripts/build-native.ps1)
+ohos/entry/libs/**/*.so
+**/*.so
+
+# Local signing & secrets — never commit
+ohos/build-profile.signing.local.json5
+ohos/build-profile.local.json5
+**/*.p12
+**/*.p7b
+**/*.cer
+**/*credentials*
+**/.env
+**/.env.*
+
+# Device dumps / debug captures
+*.dmp
+*.hap
+scripts/device-info.txt
+scripts/phone-*
+scripts/rustdesk_store.xml
+scripts/*hilog*
+mouse_trace.log
+HarmonyDesk-backups/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+*.log
+*.tmp
+*.bak

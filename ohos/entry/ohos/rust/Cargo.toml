@@ -1,0 +1,48 @@
+[package]
+name = "harmonydesk"
+version = "0.1.0"
+edition = "2021"
+authors = ["HarmonyDesk Team"]
+
+[lib]
+name = "harmonydesk"
+crate-type = ["cdylib"]
+
+[dependencies]
+# 鸿蒙 NDK 绑定
+napi_ohos = { package = "napi-ohos", git = "https://gitee.com/ohos-rs/ohos-rs.git", features = ["compat-mode", "napi8"] }
+napi-derive-ohos = { package = "napi-derive-ohos", git = "https://gitee.com/ohos-rs/ohos-rs.git", features = ["compat-mode"] }
+
+# 异步运行时
+tokio = { version = "1.35", default-features = false, features = ["rt-multi-thread", "net", "time", "io-util", "sync"] }
+
+# 字节处理
+bytes = "1.5"
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 加密
+sha2 = "0.10"
+
+# 错误处理
+thiserror = "1.0"
+anyhow = "1.0"
+
+# 日志
+log = "0.4"
+env_logger = "0.11"
+
+# 单例
+once_cell = "1.19"
+
+# UUID 生成
+uuid = { version = "1.6", features = ["v4"] }
+
+# 视频编解码（可选，后续集成）
+openh264 = { version = "0.6", optional = true }
+
+[features]
+default = []
+video = ["openh264"]
