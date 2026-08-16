@@ -1,136 +1,194 @@
-# HarmonyDesk
+# HarmonyDesk（鸿蒙远程桌面控制端）
 
-基于 [RustDesk](https://github.com/rustdesk/rustdesk) 协议的 **HarmonyOS NEXT** 远程桌面**控制端**（手机连电脑）。
+基于 [RustDesk](https://github.com/rustdesk/rustdesk) 协议的 **HarmonyOS NEXT** 远程桌面**控制端**。  
+在鸿蒙手机上侧载安装后，可连接运行 RustDesk 的电脑（或兼容协议的被控端）。
 
-> 本仓库只包含控制端客户端，不含被控端。在鸿蒙手机上侧载 HAP 后，可连接自建或兼容 RustDesk 协议的被控设备。
+> **说明**：本仓库只提供「控制端」客户端，不包含被控端服务。请仅在你有权管理的设备上使用。
 
-## 功能概览
+---
 
-- 自建 hbbs / hbbr 服务器（ID + 中继 + Key）
-- 设备 ID 连接，或 **IP 直连**（默认端口 `21118`）
-- H.264 / H.265 硬解画面（Native Window / XComponent）
-- 触摸板、滚轮、屏幕键盘（含 Ctrl+Alt+Del、Alt+F4、显示桌面 Win+D）
-- 短线自动重连、会话保活
-- 统一画质档（custom q=100 / 60fps）
+## 项目简介
 
-## 仓库结构
+HarmonyDesk 面向纯血鸿蒙（HarmonyOS NEXT）手机，把 RustDesk 控制能力做到可侧载的 HAP 应用里：
+
+- 用手机查看并操作远程电脑桌面
+- 支持自建 ID / 中继服务器，也支持局域网 IP 直连
+- 画面走系统硬解，输入支持触摸板与屏幕键盘常用快捷键
+
+适合：Mate / Pura 等 NEXT 机型作为移动控制端，连接家里或办公室的 Windows 等被控机。
+
+---
+
+## 主要功能
+
+| 功能 | 说明 |
+|------|------|
+| 自建服务器 | 配置 hbbs（ID）、hbbr（中继）与 Key |
+| 设备列表 | 保存常用设备 ID、名称与密码（仅存本机） |
+| ID 连接 | 通过 ID 服务器查询并建立会话 |
+| IP 直连 | 直接填写被控端 IP（默认端口 `21118`） |
+| 视频解码 | H.264 / H.265 硬解，XComponent 出图 |
+| 触控 | 触摸板模式、左右键、可拖拽滚轮 |
+| 键盘 | 文本/密码输入，中英切换，Ctrl+Alt+Del、Alt+F4、显示桌面 |
+| 稳定性 | 短线自动重连、会话保活 |
+
+---
+
+## 技术架构
 
 ```
-HarmonyDesk/
-├── ohos/                         # 主工程（DevEco 打开此目录）
-│   ├── AppScope/
+┌─────────────────────────────────────┐
+│  ArkTS 界面（设备列表 / 会话 / 设置） │
+└─────────────────┬───────────────────┘
+                  │ NAPI
+┌─────────────────▼───────────────────┐
+│  libharmonydesk.so（C++）             │
+│  · 视频硬解（OH AVCodec）             │
+│  · 加载并调用 Rust 核心               │
+└─────────────────┬───────────────────┘
+                  │
+┌─────────────────▼───────────────────┐
+│  libhdcore.so（Rust）                 │
+│  · RustDesk 协议 / 打洞与中继         │
+│  · 登录、键鼠、画质选项               │
+└─────────────────┬───────────────────┘
+                  │
+         hbbs / hbbr 或 IP:21118
+                  │
+            对端 RustDesk 被控端
+```
+
+技术栈概览：ArkTS UI · Rust 协议核心 · C++ NAPI / 解码 · HarmonyOS NEXT。
+
+---
+
+## 目录结构
+
+```
+dandan / HarmonyDesk
+├── ohos/                          # 主工程（请用 DevEco 打开此目录）
+│   ├── AppScope/                  # 应用级配置与图标
 │   ├── entry/
-│   │   ├── src/main/
-│   │   │   ├── ets/              # ArkTS UI / 业务
-│   │   │   ├── cpp/              # NAPI + 视频解码
-│   │   │   └── resources/
-│   │   ├── ohos/
-│   │   │   ├── hdcore/           # Rust 协议核心 (libhdcore.so)
-│   │   │   └── rust/             # 辅助 Rust 模块
-│   │   └── libs/arm64-v8a/       # 编译产物 .so（不入库）
-│   ├── build-profile.json5       # 无签名密钥的公共配置
+│   │   ├── src/main/ets/          # 页面与业务（Index、Session 等）
+│   │   ├── src/main/cpp/          # NAPI、视频解码
+│   │   ├── ohos/hdcore/           # Rust 协议核心源码
+│   │   └── libs/arm64-v8a/        # 编译出的 .so（不入库，需本地编译）
+│   ├── build-profile.json5        # 公共构建配置（不含签名密钥）
 │   └── build-profile.json5.example
 ├── scripts/
-│   ├── build-native.ps1          # 交叉编译 libhdcore.so
-│   ├── build-hap.bat             # hvigor 打 HAP
+│   ├── build-native.ps1           # 交叉编译 libhdcore.so
+│   ├── build-hap.bat              # 打包 HAP
 │   └── wait-and-install.ps1
-└── README.md
+└── README.md                      # 本说明
 ```
 
-历史目录 `harmonyos/` 为早期骨架，**请以 `ohos/` 为准**。
+仓库里若还有 `harmonyos/` 旧目录，仅为早期骨架，**请以 `ohos/` 为准**。
+
+---
 
 ## 环境要求
 
-| 组件 | 说明 |
+| 环境 | 建议 |
 |------|------|
-| DevEco Studio | 建议 5.0+，能签 HarmonyOS 调试包 |
-| HarmonyOS SDK | API 15+（HarmonyOS 6）或 API 26（HarmonyOS 7） |
-| Rust | `stable` + target `aarch64-unknown-linux-ohos` |
-| OHOS NDK | 含 `llvm/bin/clang`，供 Rust 交叉编译 |
-| Windows | 本仓库脚本以 Windows / PowerShell 为主 |
+| 开发工具 | DevEco Studio 5.0+（可自动签名） |
+| SDK | HarmonyOS API 15+（鸿蒙 6）或 API 26（鸿蒙 7） |
+| Rust | stable，并安装目标 `aarch64-unknown-linux-ohos` |
+| NDK | 带 `llvm/bin/clang` 的 OHOS Native SDK |
+| 电脑系统 | 当前脚本以 Windows + PowerShell 为主 |
+| 手机 | HarmonyOS NEXT，开启开发者模式与 USB 调试 |
 
-## 快速开始
+---
+
+## 编译与安装
 
 ### 1. 配置签名（必做）
 
-仓库**不包含**调试证书与密码。任选其一：
+公开仓库**不包含**你的调试证书和密码。任选一种方式：
 
-1. 用 DevEco 打开 `ohos/` → **File → Project Structure → Signing Configs** → 勾选自动签名（华为账号）。
-2. 或复制示例后自行填写路径：
+1. DevEco 打开 `ohos/` → **Project Structure → Signing Configs** → 勾选自动签名并登录华为账号。  
+2. 或复制示例后手工填写：
 
 ```bat
 copy ohos\build-profile.json5.example ohos\build-profile.json5
 ```
 
-然后编辑 `ohos/build-profile.json5` 中的 `certpath` / `storeFile` / 密码字段。
+再编辑其中的证书路径与口令。
 
 ### 2. 编译 Rust 核心库
-
-设置 NDK 路径后执行：
 
 ```powershell
 $env:OHOS_NATIVE_HOME = "C:\path\to\ohos-sdk\native"
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native.ps1
 ```
 
-产物：`ohos/entry/libs/arm64-v8a/libhdcore.so`。
+成功后会生成：`ohos/entry/libs/arm64-v8a/libhdcore.so`。
 
-### 3. 编译并安装 HAP
+### 3. 打包并安装到手机
 
 ```bat
 scripts\build-hap.bat
 hdc install ohos\entry\build\default\outputs\default\entry-default-signed.hap
 ```
 
-设备需开启「开发者模式 / USB 调试」，且调试证书已绑定该机 UDID。
+调试证书必须绑定当前手机的 UDID，否则安装或启动会失败。
 
-### 4. 配置服务器
+---
 
-应用内 **设置** 填写自建 RustDesk 服务：
+## 使用说明
 
-| 项 | 示例（请换成你自己的） |
-|----|------------------------|
-| ID 服务器 hbbs | `your.domain.com:21116` |
-| 中继 hbbr | `your.domain.com:21117` |
-| Key | 与 hbbs 启动参数 `-k` 一致 |
+1. 打开应用，进入 **设置**，填写自建服务（示例请换成你自己的）：
 
-局域网也可在「新建连接」直接填被控端 IP（默认 `21118`）。
+| 配置项 | 含义 | 示例格式 |
+|--------|------|----------|
+| ID 服务器 | hbbs | `你的域名或IP:21116` |
+| 中继服务器 | hbbr | `你的域名或IP:21117` |
+| Key | 与 hbbs 的 `-k` 一致 | 一长串公钥字符串 |
+
+2. 在 **设备** 页新建连接：填对端 **设备 ID** 与 **远程密码**，或填局域网 **IP** 直连。  
+3. 进入会话后可用底栏打开键盘，发送 Ctrl+Alt+Del、Alt+F4、显示桌面等。
 
 **请勿把真实服务器地址、Key、远程密码提交到 Git。**
 
-## 安全说明
+---
 
-已从公开仓库中剥离：
+## 安全与隐私
 
-- 本机调试签名证书路径与密钥口令
-- 自建服务器 IP / Key / 设备密码等偏好导出
-- 设备 hilog、崩溃 dump、截图等调试产物
+本公开仓库已刻意移除：
 
-本地若仍有签名备份文件 `ohos/build-profile.signing.local.json5`，该文件已被 `.gitignore` 忽略，请勿上传。
+- 本机签名证书路径与密钥口令  
+- 自建服务器 IP、Key、设备密码等本地偏好  
+- 调试用的 hilog、崩溃 dump、截图等
 
-## 架构简图
+本地签名备份若存在 `ohos/build-profile.signing.local.json5`，已被 `.gitignore` 忽略，请勿上传。
 
-```
-ArkTS (Index / Session / Store)
-        │  NAPI
-        ▼
-libharmonydesk.so  ──►  video_decoder (OH AVCodec)
-        │  dlopen
-        ▼
-libhdcore.so (Rust) ──► hbbs/hbbr / IP:21118 ──► 对端 RustDesk
-```
+---
+
+## 常见问题
+
+**装不上 / 打不开？**  
+检查是否已自动签名、UDID 是否在证书里、系统 API 是否匹配。
+
+**能连上但很卡？**  
+优先试局域网 IP 直连；公网中继延迟取决于网络与服务器。
+
+**Ctrl+Alt+Del 无效？**  
+部分 Windows 被控端需允许软件安全注意序列（SAS）相关策略，与官方 RustDesk 相同。
+
+---
 
 ## 相关文档
 
-仓库内另有协议与开发笔记（部分路径可能仍写旧的 `harmonyos/`，以本文为准）：
+- [PROTOCOL.md](./PROTOCOL.md) — 协议与端口说明  
+- [DEVELOPMENT.md](./DEVELOPMENT.md) — 开发备忘  
+- [VIDEO_DECODER.md](./VIDEO_DECODER.md) — 解码相关笔记  
 
-- [PROTOCOL.md](./PROTOCOL.md) — 协议与端口
-- [DEVELOPMENT.md](./DEVELOPMENT.md) — 开发备忘
-- [VIDEO_DECODER.md](./VIDEO_DECODER.md) — 解码相关
+（部分旧文档仍可能写到 `harmonyos/` 路径，以本 README 的 `ohos/` 为准。）
 
-## 许可证与致谢
+---
 
-- 协议兼容 [RustDesk](https://github.com/rustdesk/rustdesk) 开源生态
-- 本项目衍生自社区 HarmonyDesk 工程，面向 HarmonyOS NEXT 控制端场景继续演进
+## 致谢与声明
 
-使用前请遵守当地法律与被控设备所有者的授权要求。
+- 协议兼容开源 [RustDesk](https://github.com/rustdesk/rustdesk) 生态  
+- 在社区 HarmonyDesk 相关工程基础上，面向 HarmonyOS NEXT 控制端继续演进  
+
+使用本软件时，请遵守当地法律法规，并获得被控设备所有者的明确授权。
